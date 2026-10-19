@@ -1,0 +1,4 @@
+build/
+a.out
+web/icg.js
+web/icg.wasm
