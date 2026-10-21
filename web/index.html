@@ -272,6 +272,7 @@
 <script>
 const SAMPLES = {
   "loops and arrays": `int[10][10] a;
+int i, j;
 
 for (i = 0; i < 10; i = i + 1) {
     for (j = 0; j < 10; j = j + 1) {
@@ -282,10 +283,12 @@ for (i = 0; i < 10; i = i + 1) {
 for (i = 0; i < 10; i = i + 1) {
     a[i][i] = 1;
 }`,
-  "short-circuiting boolean": `if (x < 100 || x > 200 && x != y)
+  "short-circuiting boolean": `int x, y;
+if (x < 100 || x > 200 && x != y)
     x = 0;
 `,
-  "control flow": `if (x + y < 0)
+  "control flow": `int x, y;
+if (x + y < 0)
     while (y < 0)
         y = y + 1;
 
@@ -300,7 +303,8 @@ while (x > y) {
     if (y % 2 == 0) continue;
     y = y + 1;
 }`,
-  "expression": `p = a + a * (b - c) + (b - c) * d;`
+  "expression": `int a, b, c, d, p;
+p = a + a * (b - c) + (b - c) * d;`
 };
 
 const GRAMMAR = `
@@ -386,7 +390,8 @@ const sourceEl = $('src'), listing = $('listing'), status = $('status'),
 
 let monacoEditor = null;
 let compile = null;          // set once the wasm module is ready
-let lastOutput = '';         // raw text of the last successful compile
+let lastOutput = '';         // text form of the last successful compile (for Copy)
+let lastProgram = null;      // its structured form (result.program)
 let notes = [];              // lexer messages printed during a compile
 let timer = 0;
 
@@ -452,50 +457,58 @@ function el(tag, cls, text) {
   return n;
 }
 
-// "t3 = t1 + t2", "if i < 10 goto L5", "goto L3"  ->  coloured DOM nodes
-function renderInstruction(text) {
-  const frag = document.createDocumentFragment();
-  const m = /^(.*?)(goto )(L\d+)$/.exec(text);
-  const head = m ? m[1] : text;
-  head.split(/(\bt\d+\b)/).forEach(part => {
-    if (/^t\d+$/.test(part)) frag.append(el('span', 'tmp', part));
-    else if (part) frag.append(part);
-  });
-  if (m) {
-    frag.append(m[2]);
-    const j = el('span', 'jump', m[3]);
-    j.dataset.l = m[3];
-    frag.append(j);
-  }
-  return frag;
+// Operand: temps are tinted, everything else is plain text.
+function operand(o) {
+  return o.k === 'temp' ? el('span', 'tmp', o.v) : document.createTextNode(o.v);
 }
 
-function render(output) {
-  const lines = output.split('\n');
-  let maxLabels = 1;
-  const rows = lines.map(line => {
-    const m = /^((?:L\d+:\s*)*)(.*)$/.exec(line);
-    const labels = m[1].match(/L\d+/g) || [];
-    maxLabels = Math.max(maxLabels, labels.length);
-    return { labels, text: m[2] };
+// A jump target; hovering it highlights the label it points at.
+function jump(target) {
+  const j = el('span', 'jump', 'L' + target);
+  j.dataset.l = 'L' + target;
+  return j;
+}
+
+// Builds the instruction text from its structured fields.
+function renderInstruction(i) {
+  const f = document.createDocumentFragment();
+  const add = (...parts) => parts.forEach(p => f.append(p));
+  switch (i.op) {
+    case 'copy':  add(operand(i.dst), ' = ', operand(i.a)); break;
+    case 'bin':   add(operand(i.dst), ' = ', operand(i.a), ' ' + i.o + ' ', operand(i.b)); break;
+    case 'neg':   add(operand(i.dst), ' = minus ', operand(i.a)); break;
+    case 'load':  add(operand(i.dst), ' = ', operand(i.a), '[', operand(i.b), ']'); break;
+    case 'store': add(operand(i.dst), '[', operand(i.a), '] = ', operand(i.b)); break;
+    case 'if':    add('if ', operand(i.a), ' ' + i.o + ' ', operand(i.b), ' goto ', jump(i.target)); break;
+    case 'goto':  add('goto ', jump(i.target)); break;
+  }
+  return f;
+}
+
+function labelGutter(labels) {
+  const gutter = el('span', 'labels');
+  labels.forEach(n => {
+    const s = el('span', 'lbl', 'L' + n + ':');
+    s.dataset.l = 'L' + n;
+    gutter.append(s);
   });
-  // Drop a trailing empty row (output ending in a newline).
-  while (rows.length > 1 && !rows[rows.length - 1].labels.length && !rows[rows.length - 1].text) rows.pop();
+  return gutter;
+}
+
+function render(program) {
+  const rows = program.instrs.map(i => ({ labels: i.labels, body: renderInstruction(i) }));
+  if (program.endLabels.length) {
+    rows.push({ labels: program.endLabels, body: el('span', 'end', 'end of program') });
+  }
+  const maxLabels = rows.reduce((m, r) => Math.max(m, r.labels.length), 1);
 
   listing.replaceChildren();
   listing.style.setProperty('--gutter', (maxLabels * 5 + 1) + 'ch');
   rows.forEach(r => {
     const li = el('li');
-    const gutter = el('span', 'labels');
-    r.labels.forEach(l => {
-      const s = el('span', 'lbl', l + ':');
-      s.dataset.l = l;
-      gutter.append(s);
-    });
-    li.append(gutter);
+    li.append(labelGutter(r.labels));
     const body = el('span');
-    if (r.text) body.append(renderInstruction(r.text));
-    else body.append(el('span', 'end', 'end of program'));
+    body.append(r.body);
     li.append(body);
     listing.append(li);
   });
@@ -515,7 +528,7 @@ listing.addEventListener('mouseout',  e => highlight(e.target, false));
 function setStatus(result) {
   status.replaceChildren();
   if (result.ok) {
-    const n = lastOutput.split('\n').filter(l => l.replace(/^(?:L\d+:\s*)*/, '')).length;
+    const n = lastProgram.instrs.length;
     status.textContent = n + (n === 1 ? ' instruction' : ' instructions');
   } else {
     const e = result.error;
@@ -577,7 +590,8 @@ function run() {
   }
   if (result.ok) {
     lastOutput = result.output;
-    render(result.output);
+    lastProgram = result.program;
+    render(result.program);
     listing.classList.remove('stale');
     copyBtn.disabled = false;
   } else {

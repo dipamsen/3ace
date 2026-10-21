@@ -1,0 +1,15 @@
+L2: 	if x > y goto L3
+goto L1
+L3: 	t1 = x - 1
+x = t1
+if x == 0 goto L5
+goto L4
+L5: 	goto L1
+L4: 	t2 = y % 2
+if t2 == 0 goto L7
+goto L6
+L7: 	goto L2
+L6: 	t3 = y + 1
+y = t3
+goto L2
+L1: 	

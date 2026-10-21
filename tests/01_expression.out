@@ -1,0 +1,8 @@
+t4 = b - c
+t3 = a * t4
+t2 = a + t3
+t6 = b - c
+t5 = t6 * d
+t1 = t2 + t5
+p = t1
+L1: 	

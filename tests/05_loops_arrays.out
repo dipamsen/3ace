@@ -1,0 +1,27 @@
+i = 0
+L3: 	if i < 10 goto L5
+goto L2
+L5: 	j = 0
+L6: 	if j < 10 goto L8
+goto L4
+L8: 	t1 = i * 40
+t2 = j * 4
+t3 = t1 + t2
+a[t3] = 0
+L7: 	t4 = j + 1
+j = t4
+goto L6
+L4: 	t5 = i + 1
+i = t5
+goto L3
+L2: 	i = 0
+L9: 	if i < 10 goto L11
+goto L1
+L11: 	t6 = i * 40
+t7 = i * 4
+t8 = t6 + t7
+a[t8] = 1
+L10: 	t9 = i + 1
+i = t9
+goto L9
+L1: 	

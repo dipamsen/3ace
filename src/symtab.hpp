@@ -1,8 +1,10 @@
 #ifndef SYMTAB_H
 #define SYMTAB_H
 
+#include <stdexcept>
 #include <string>
-#include <unordered_map>
+#include <vector>
+#include <memory>
 #include "type.hpp"
 
 struct STEntry {
@@ -11,23 +13,26 @@ struct STEntry {
 };
 
 class SymbolTable {
-    std::unordered_map<std::string, STEntry> map;
+    std::vector<std::unique_ptr<STEntry>> entries;
+
 public:
-    void insert(std::string name, Type *type) {
-        map[name] = {
-            .name = name,
-            .type = type
-        };
-    }
-    Type *getType(std::string name) {
-        if (map.count(name)) {
-            return map[name].type;
-        } else {
-            return nullptr;
+    STEntry* insert(std::string name, Type *type) {
+        if (lookup(name) != nullptr) {
+            throw std::runtime_error("'" + name + "' is already declared");
         }
+        auto new_entry = std::make_unique<STEntry>(STEntry{name, type});
+        STEntry* ptr = new_entry.get();
+        entries.push_back(std::move(new_entry));
+        return ptr;
+    }
+
+    STEntry* lookup(std::string name) {
+        for (auto &el : entries) {
+            if (el->name == name) return el.get();
+        }
+        return nullptr;
     }
 };
-
 
 inline SymbolTable ST;
 

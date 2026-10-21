@@ -1,0 +1,8 @@
+int x, y;
+
+while (x > y) {
+    x = x - 1;
+    if (x == 0) break;
+    if (y % 2 == 0) continue;
+    y = y + 1;
+}

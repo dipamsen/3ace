@@ -21,6 +21,7 @@ Program *prog;
     char *str;
     StmtNode *stmt;
     StmtListNode *stmtList;
+    Program *program;
     VarList *varList;
     ExprNode *expr;
     PartialArrReference *partialArr;
@@ -34,6 +35,7 @@ Program *prog;
 
 %token <str> WHILE FOR IF ELSE SWITCH CASE RETURN BREAK CONTINUE INT FLOAT VOID ID NUM FLT RELOP AND OR TRUE FALSE
 
+%type <program> PROG
 %type <stmtList> STMT_LIST
 %type <stmt> STMT DECL ASGN OPT_ASGN
 %type <varList> VARLIST
@@ -119,6 +121,7 @@ ARR_REF     : ID '[' EXPR ']'                                       { $$ = new P
 BOOL        : BOOL OR BOOL                                          { $$ = new BinOpBoolNode($1, $3, OR_OP); }
             | BOOL AND BOOL                                         { $$ = new BinOpBoolNode($1, $3, AND_OP); }
             | '!' BOOL %prec NOT                                    { $$ = new BinOpBoolNode($2, nullptr, NOT_OP); }
+            | '(' BOOL ')'                                          { $$ = $2; }
             | EXPR RELOP EXPR                                       { $$ = new RelOpBoolNode($1, $3, $2); }
             | TRUE                                                  { $$ = new ConstBoolNode(true); }
             | FALSE                                                 { $$ = new ConstBoolNode(false); }
@@ -138,6 +141,7 @@ LST         : LST '[' NUM ']'                                       { $1->push_b
 %%
 
 #ifdef ICG_LIB
+
 
 static std::string lastError;   // message set by yyerror()
 
@@ -174,8 +178,62 @@ static std::string errorJson(const std::string &message, int line) {
     return out;
 }
 
+static std::string operandJson(const Operand &o) {
+    const char *kind = o.kind == OperandKind::Const ? "const"
+                     : o.kind == OperandKind::Temp  ? "temp" : "var";
+    return std::string("{\"k\":\"") + kind + "\",\"v\":\"" + jsonEscape(o.text) + "\"}";
+}
+
+// One instruction, with only the fields its op uses:
+//   copy  {dst,a}          bin  {dst,a,o,b}      neg  {dst,a}
+//   load  {dst,a,b}        store {dst,a,b}
+//   if    {a,o,b,target}   goto {target}
+static std::string instrJson(const Instr &i) {
+    std::string out = "{\"labels\":[";
+    for (size_t k = 0; k < i.labels.size(); k++) {
+        if (k) out += ",";
+        out += std::to_string(i.labels[k]);
+    }
+    out += "],";
+    switch (i.op) {
+        case Op::Copy:
+            out += "\"op\":\"copy\",\"dst\":" + operandJson(i.dst) + ",\"a\":" + operandJson(i.a); break;
+        case Op::Bin:
+            out += "\"op\":\"bin\",\"dst\":" + operandJson(i.dst) + ",\"a\":" + operandJson(i.a)
+                 + ",\"o\":\"" + jsonEscape(i.oper) + "\",\"b\":" + operandJson(i.b); break;
+        case Op::Neg:
+            out += "\"op\":\"neg\",\"dst\":" + operandJson(i.dst) + ",\"a\":" + operandJson(i.a); break;
+        case Op::Load:
+            out += "\"op\":\"load\",\"dst\":" + operandJson(i.dst) + ",\"a\":" + operandJson(i.a)
+                 + ",\"b\":" + operandJson(i.b); break;
+        case Op::Store:
+            out += "\"op\":\"store\",\"dst\":" + operandJson(i.dst) + ",\"a\":" + operandJson(i.a)
+                 + ",\"b\":" + operandJson(i.b); break;
+        case Op::If:
+            out += "\"op\":\"if\",\"a\":" + operandJson(i.a) + ",\"o\":\"" + jsonEscape(i.oper)
+                 + "\",\"b\":" + operandJson(i.b) + ",\"target\":" + std::to_string(i.target); break;
+        case Op::Goto:
+            out += "\"op\":\"goto\",\"target\":" + std::to_string(i.target); break;
+    }
+    return out + "}";
+}
+
+static std::string listingJson(const Listing &p) {
+    std::string out = "{\"instrs\":[";
+    for (size_t k = 0; k < p.instrs.size(); k++) {
+        if (k) out += ",";
+        out += instrJson(p.instrs[k]);
+    }
+    out += "],\"endLabels\":[";
+    for (size_t k = 0; k < p.endLabels.size(); k++) {
+        if (k) out += ",";
+        out += std::to_string(p.endLabels[k]);
+    }
+    return out + "]}";
+}
+
 // Compiles `source` and returns JSON:
-//   {"ok":true,"output":"<three-address code>"}
+//   {"ok":true,"output":"<text form>","program":{"instrs":[...],"endLabels":[...]}}
 //   {"ok":false,"error":{"message":"...","line":N|null}}
 // The returned pointer stays valid until the next call.
 extern "C" const char *icg_compile(const char *source) {
@@ -197,7 +255,9 @@ extern "C" const char *icg_compile(const char *source) {
     }
 
     try {
-        result = "{\"ok\":true,\"output\":\"" + jsonEscape(prog->getCode()) + "\"}";
+        Listing listing = prog->getCode().flatten();
+        result = "{\"ok\":true,\"output\":\"" + jsonEscape(toText(listing))
+               + "\",\"program\":" + listingJson(listing) + "}";
     } catch (const std::exception &e) {
         result = errorJson(e.what(), 0);
     }
@@ -220,7 +280,7 @@ int main(int argc, char **argv) {
 
     std::string code;
     try {
-        code = prog->getCode();
+        code = toText(prog->getCode().flatten());
     } catch (const std::exception &e) {
         fprintf(stderr, "Error: %s\n", e.what());
         return 1;

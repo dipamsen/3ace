@@ -1,0 +1,2 @@
+int a, b, c, d, p;
+p = a + a * (b - c) + (b - c) * d;

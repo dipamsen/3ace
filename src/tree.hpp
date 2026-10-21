@@ -10,18 +10,13 @@
 #include "type.hpp"
 #include "symtab.hpp"
 
+
 // Counters for generated labels (L1, L2, ...) and temporaries (t1, t2, ...).
 inline int labelCount = 0;
 inline int tempCount = 0;
 
 inline int newlabel() {
     return ++labelCount;
-}
-
-inline std::string label(int l) {
-    std::stringstream ss;
-    ss << "L" << l << ": \t";
-    return ss.str();
 }
 
 // Jump targets of the loops enclosing the statement being generated
@@ -43,13 +38,21 @@ inline void resetState() {
 }
 
 // Array indexing needs an array type; report why when it isn't one.
-inline ArrayType *arrayTypeOrThrow(Type *type, const std::string &name) {
+inline ArrayType *arrayTypeOrThrow(Type *type, STEntry *entry) {
     if (type == nullptr)
-        throw std::runtime_error("'" + name + "' is not declared");
+        throw std::runtime_error("'" + entry->name + "' is not declared");
     ArrayType *arrType = dynamic_cast<ArrayType *>(type);
     if (arrType == nullptr)
-        throw std::runtime_error("'" + name + "' is not an array, or is indexed with too many dimensions");
+        throw std::runtime_error("'" + entry->name + "' is not an array, or is indexed with too many dimensions");
     return arrType;
+}
+
+inline STEntry *requireDeclared(const std::string &name) {
+    STEntry *entry = ST.lookup(name);
+    if (entry == nullptr) {
+        throw std::runtime_error("'" + name + "' is not declared");
+    }
+    return entry;
 }
 
 class Address;
@@ -65,15 +68,20 @@ class TypeNode;
 class VarList;
 class PartialArrReference;
 
+bool needsNext(const StmtNode *stmt);
+
 enum BoolOpType { AND_OP, OR_OP, NOT_OP };
 enum BinOpType  { PLUS, MINUS, MUL, DIV, MOD };
 enum ConstType  { INT_CONST, FLOAT_CONST };
 enum BaseType   { INT_TYPE, FLOAT_TYPE };
 
+enum class OperandKind { Const, Var, Temp };
+
 class Address {
 public:
     virtual ~Address() = default;
     virtual std::string toString() = 0;
+    virtual OperandKind kind() const = 0;
 };
 
 class ConstAddress : public Address {
@@ -81,6 +89,7 @@ class ConstAddress : public Address {
 public:
     explicit ConstAddress(std::string val) : val(std::move(val)) {}
     std::string toString() override { return val; }
+    OperandKind kind() const override { return OperandKind::Const; }
 };
 
 class TempAddress : public Address {
@@ -95,19 +104,161 @@ public:
         ss << "t" << tmpno;
         return ss.str();
     }
+    OperandKind kind() const override { return OperandKind::Temp; }
 };
 
 class RefAddress : public Address {
-    std::string name;
 public:
+    std::string name;
+    STEntry *entry = nullptr;
+
     explicit RefAddress(std::string name) : name(std::move(name)) {}
+
+    STEntry *resolve() {
+        if (entry != nullptr) return entry;
+        entry = ST.lookup(name);
+        if (entry == nullptr) {
+            throw std::runtime_error("'" + name + "' is not declared");
+        }
+        return entry;
+    }
     std::string toString() override { return name; }
+    OperandKind kind() const override { return OperandKind::Var; }
 };
+
+struct Operand {
+    OperandKind kind = OperandKind::Var;
+    std::string text;
+};
+
+inline Operand operandOf(Address *a) {
+    return { a->kind(), a->toString() };
+}
+
+inline Operand constOperand(int value) {
+    return { OperandKind::Const, std::to_string(value) };
+}
+
+inline Operand varOperand(const std::string &name) {
+    return { OperandKind::Var, name };
+}
+
+enum class Op {
+    Copy,   // dst = a
+    Bin,    // dst = a oper b
+    Neg,    // dst = minus a
+    Load,   // dst = arr[a]
+    Store,  // arr[a] = b
+    If,     // if a oper b goto target
+    Goto    // goto target
+};
+
+struct Instr {
+    Op op = Op::Goto;
+    Operand dst, a, b;
+    std::string oper;
+    int target = 0;
+    std::vector<int> labels;
+
+    // dst = a
+    static Instr copy(Operand dst, Operand a) {
+        Instr i; i.op = Op::Copy; i.dst = dst; i.a = a; return i;
+    }
+    // dst = a op b
+    static Instr bin(Operand dst, Operand a, std::string oper, Operand b) {
+        Instr i; i.op = Op::Bin; i.dst = dst; i.a = a; i.oper = std::move(oper); i.b = b; return i;
+    }
+    // dst = minus a
+    static Instr neg(Operand dst, Operand a) {
+        Instr i; i.op = Op::Neg; i.dst = dst; i.a = a; return i;
+    }
+    // dst = a[b]
+    static Instr load(Operand dst, Operand arr, Operand index) {
+        Instr i; i.op = Op::Load; i.dst = dst; i.a = arr; i.b = index; return i;
+    }
+    // dst[a] = b
+    static Instr store(Operand arr, Operand index, Operand value) {
+        Instr i; i.op = Op::Store; i.dst = arr; i.a = index; i.b = value; return i;
+    }
+    // if a rel b goto target
+    static Instr ifGoto(Operand a, std::string rel, Operand b, int target) {
+        Instr i; i.op = Op::If; i.a = a; i.oper = std::move(rel); i.b = b; i.target = target; return i;
+    }
+    // goto target
+    static Instr jump(int target) {
+        Instr i; i.op = Op::Goto; i.target = target; return i;
+    }
+};
+
+struct Listing {
+    std::vector<Instr> instrs;
+    std::vector<int> endLabels;
+};
+
+// A fragment of code under construction: instructions and label markers, in
+// order. Fragments are concatenated with append().
+class Code {
+    struct Item {
+        bool isLabel;
+        int label;
+        Instr instr;
+    };
+    std::vector<Item> items;
+public:
+    void emit(const Instr &instr) { items.push_back({false, 0, instr}); }
+    void placeLabel(int l)        { items.push_back({true, l, Instr()}); }
+    void append(const Code &other) {
+        items.insert(items.end(), other.items.begin(), other.items.end());
+    }
+
+    // Attaches each label to the instruction that follows it.
+    Listing flatten() const {
+        Listing p;
+        std::vector<int> pending;
+        for (const Item &item : items) {
+            if (item.isLabel) {
+                pending.push_back(item.label);
+            } else {
+                Instr i = item.instr;
+                i.labels = pending;
+                pending.clear();
+                p.instrs.push_back(i);
+            }
+        }
+        p.endLabels = pending;
+        return p;
+    }
+};
+
+
+inline std::string instrText(const Instr &i) {
+    std::stringstream ss;
+    switch (i.op) {
+        case Op::Copy:  ss << i.dst.text << " = " << i.a.text; break;
+        case Op::Bin:   ss << i.dst.text << " = " << i.a.text << " " << i.oper << " " << i.b.text; break;
+        case Op::Neg:   ss << i.dst.text << " = minus " << i.a.text; break;
+        case Op::Load:  ss << i.dst.text << " = " << i.a.text << "[" << i.b.text << "]"; break;
+        case Op::Store: ss << i.dst.text << "[" << i.a.text << "] = " << i.b.text; break;
+        case Op::If:    ss << "if " << i.a.text << " " << i.oper << " " << i.b.text << " goto L" << i.target; break;
+        case Op::Goto:  ss << "goto L" << i.target; break;
+    }
+    return ss.str();
+}
+
+inline std::string toText(const Listing &p) {
+    std::stringstream ss;
+    for (const Instr &i : p.instrs) {
+        for (int l : i.labels) ss << "L" << l << ": \t";
+        ss << instrText(i) << "\n";
+    }
+    for (int l : p.endLabels) ss << "L" << l << ": \t";
+    return ss.str();
+}
 
 class Node {
 public:
     virtual ~Node() = default;
-    virtual std::string getCode() { return "ROOTO"; }
+    virtual Code getCode() { return Code(); }
 };
 
 class ExprNode : public Node {
@@ -115,7 +266,7 @@ public:
     Address *addr;
     ExprNode() : addr(nullptr) {}
     ~ExprNode() override = default;
-    virtual std::string getCode() override = 0;
+    virtual Code getCode() override = 0;
 };
 
 class BinOpExprNode : public ExprNode {
@@ -137,14 +288,13 @@ public:
         return "";
     }
 
-    std::string getCode() override {
-        std::stringstream ss;
+    Code getCode() override {
+        Code code;
         addr = new TempAddress();
-        ss << left->getCode();
-        ss << right->getCode();
-        ss << addr->toString() << " = " << left->addr->toString() 
-           << " " << getOp() << " " << right->addr->toString() << "\n";
-        return ss.str();
+        code.append(left->getCode());
+        code.append(right->getCode());
+        code.emit(Instr::bin(operandOf(addr), operandOf(left->addr), getOp(), operandOf(right->addr)));
+        return code;
     }
 };
 
@@ -153,12 +303,12 @@ class UnaryOpExprNode : public ExprNode {
 public:
     explicit UnaryOpExprNode(ExprNode *expr) : expr(expr) {}
 
-    std::string getCode() override {
-        std::stringstream ss;
+    Code getCode() override {
+        Code code;
         addr = new TempAddress();
-        ss << expr->getCode();
-        ss << addr->toString() << " = minus " << expr->addr->toString() << "\n";
-        return ss.str();
+        code.append(expr->getCode());
+        code.emit(Instr::neg(operandOf(addr), operandOf(expr->addr)));
+        return code;
     }
 };
 
@@ -168,7 +318,10 @@ public:
     explicit IdExprNode(const std::string &varName) : varName(varName) {
         addr = new RefAddress(varName);
     }
-    std::string getCode() override { return ""; }
+    Code getCode() override {
+        dynamic_cast<RefAddress *>(addr)->resolve();
+        return Code(); 
+    }
 };
 
 class ConstExprNode : public ExprNode {
@@ -179,14 +332,14 @@ public:
         : type(type), value(value) {
         addr = new ConstAddress(value);
     }
-    std::string getCode() override { return ""; }
+    Code getCode() override { return Code(); }
 };
 
 class PartialArrReference : public Node {
-public:
-    std::string varName;
+    public:
+    RefAddress *base;
     std::vector<ExprNode *> indices;
-    explicit PartialArrReference(std::string varName) : varName(std::move(varName)) {}
+    explicit PartialArrReference(std::string varName) { base = new RefAddress(varName); }
     void insert(ExprNode *index) { indices.push_back(index); }
 };
 
@@ -196,42 +349,40 @@ public:
     explicit ArrayReferenceExprNode(PartialArrReference *partialArrRef) 
         : partialArrRef(partialArrRef) {}
 
-    std::string getCode() override {
-        std::stringstream ss;
-        Type* currType = ST.getType(partialArrRef->varName);
+    Code getCode() override {
+        Code code;
+        STEntry *entry = partialArrRef->base->resolve();
+        Type *currType = entry->type;
         TempAddress* offsetAddr = nullptr;
 
         for (size_t i = 0; i < partialArrRef->indices.size(); ++i) {
             ExprNode* indexExpr = partialArrRef->indices[i];
-            ss << indexExpr->getCode();
+            code.append(indexExpr->getCode());
             
-            ArrayType* arrType = arrayTypeOrThrow(currType, partialArrRef->varName);
+            ArrayType* arrType = arrayTypeOrThrow(currType, entry);
             
             currType = arrType->elem;
             
             // t = E.addr * L.type.width
             TempAddress* t_term = new TempAddress();
-            ss << t_term->toString() << " = " << indexExpr->addr->toString() 
-               << " * " << currType->width << "\n";
+            code.emit(Instr::bin(operandOf(t_term), operandOf(indexExpr->addr), "*", constOperand(currType->width)));
                
             if (i == 0) {
                 offsetAddr = t_term;
             } else {
                 // L.addr = L1.addr + t
                 TempAddress* t_newOffset = new TempAddress();
-                ss << t_newOffset->toString() << " = " << offsetAddr->toString() 
-                   << " + " << t_term->toString() << "\n";
+                code.emit(Instr::bin(operandOf(t_newOffset), operandOf(offsetAddr), "+", operandOf(t_term)));
                 offsetAddr = t_newOffset;
             }
         }
         
         addr = new TempAddress();
         if (offsetAddr) {
-            ss << addr->toString() << " = " << partialArrRef->varName 
-               << "[" << offsetAddr->toString() << "]\n";
+            code.emit(Instr::load(operandOf(addr), operandOf(partialArrRef->base), operandOf(offsetAddr)));
         }
         
-        return ss.str();
+        return code;
     }
 };
 
@@ -240,21 +391,17 @@ public:
     int t = 0;
     int f = 0;
     ~BoolNode() override = default;
-    virtual std::string getCode() override = 0;
+    virtual Code getCode() override = 0;
 };
 
 class ConstBoolNode : public BoolNode {
     bool value;
 public:
     explicit ConstBoolNode(bool value) : value(value) {}
-    std::string getCode() override {
-        std::stringstream ss;
-        if (value) {
-            ss << "goto L" << t << std::endl;
-        } else {
-            ss << "goto L" << f << std::endl;
-        }
-        return ss.str();
+    Code getCode() override {
+        Code code;
+        code.emit(Instr::jump(value ? t : f));
+        return code;
     }
 };
 
@@ -266,14 +413,13 @@ public:
     RelOpBoolNode(ExprNode *left, ExprNode *right, std::string op)
         : left(left), right(right), op(std::move(op)) {}
 
-    std::string getCode() override {
-        std::stringstream ss;
-        ss << left->getCode();
-        ss << right->getCode();
-        ss << "if " << left->addr->toString() << " " << op << " " 
-           << right->addr->toString() << " goto L" << t << "\n";
-        ss << "goto L" << f << "\n";
-        return ss.str();
+    Code getCode() override {
+        Code code;
+        code.append(left->getCode());
+        code.append(right->getCode());
+        code.emit(Instr::ifGoto(operandOf(left->addr), op, operandOf(right->addr), t));
+        code.emit(Instr::jump(f));
+        return code;
     }
 };
 
@@ -285,30 +431,30 @@ public:
     BinOpBoolNode(BoolNode *left, BoolNode *right, BoolOpType op)
         : left(left), right(right), op(op) {}
 
-    std::string getCode() override {
-        std::stringstream ss;
+    Code getCode() override {
+        Code code;
         if (op == AND_OP) {
             left->t = newlabel();
             left->f = f;
             right->t = t;
             right->f = f;
-            ss << left->getCode();
-            ss << label(left->t);
-            ss << right->getCode();
+            code.append(left->getCode());
+            code.placeLabel(left->t);
+            code.append(right->getCode());
         } else if (op == OR_OP) {
             left->t = t;
             left->f = newlabel();
             right->t = t;
             right->f = f;
-            ss << left->getCode();
-            ss << label(left->f);
-            ss << right->getCode();
+            code.append(left->getCode());
+            code.placeLabel(left->f);
+            code.append(right->getCode());
         } else if (op == NOT_OP) {
             left->t = f;
             left->f = t;
-            ss << left->getCode();
+            code.append(left->getCode());
         }
-        return ss.str();
+        return code;
     }
 };
 
@@ -316,7 +462,7 @@ class StmtNode : public Node {
 public:
     int next = 0;
     ~StmtNode() override = default;
-    virtual std::string getCode() override = 0;
+    virtual Code getCode() override = 0;
 };
 
 class WhileStmtNode : public StmtNode {
@@ -325,19 +471,20 @@ class WhileStmtNode : public StmtNode {
 public:
     WhileStmtNode(BoolNode *boolExpr, StmtNode *stmt) 
         : boolExpr(boolExpr), stmt(stmt) {}
-    std::string getCode() override { 
-        std::stringstream ss;
+    Code getCode() override { 
+        Code code;
         int begin = newlabel();
-        ss << label(begin);
+        code.placeLabel(begin);
         boolExpr->t = newlabel();
         boolExpr->f = next;
-        ss << boolExpr->getCode();
+        code.append(boolExpr->getCode());
         stmt->next = begin;
         loopStack.push_back({next, begin});
-        ss << label(boolExpr->t) << stmt->getCode();
+        code.placeLabel(boolExpr->t);
+        code.append(stmt->getCode());
         loopStack.pop_back();
-        ss << "goto L" << begin << std::endl;
-        return ss.str();
+        code.emit(Instr::jump(begin));
+        return code;
     }
 };
 
@@ -349,25 +496,26 @@ class ForStmtNode : public StmtNode {
     StmtNode *body;
 public:
     ForStmtNode(StmtNode *init, BoolNode *cond, StmtNode *incr, StmtNode *body): init(init), cond(cond), incr(incr), body(body) {}
-    std::string getCode() override {
-        std::stringstream ss;
+    Code getCode() override {
+        Code code;
         int begin = newlabel();
         int incrLabel = newlabel(); // `continue` jumps here, so incr is not skipped
-        if (init) ss << init->getCode();
-        ss << label(begin);
+        if (init) code.append(init->getCode());
+        code.placeLabel(begin);
         if (cond) {
             cond->t = newlabel();
             cond->f = next;
-            ss << cond->getCode() << label(cond->t);
+            code.append(cond->getCode());
+            code.placeLabel(cond->t);
         }
         body->next = incrLabel;
         loopStack.push_back({next, incrLabel});
-        ss << body->getCode();
+        code.append(body->getCode());
         loopStack.pop_back();
-        ss << label(incrLabel);
-        if (incr) ss << incr->getCode();
-        ss << "goto L" << begin << std::endl;
-        return ss.str();
+        code.placeLabel(incrLabel);
+        if (incr) code.append(incr->getCode());
+        code.emit(Instr::jump(begin));
+        return code;
     }
 };
 
@@ -379,46 +527,48 @@ public:
     IfStmtNode(BoolNode *boolExpr, StmtNode *thenStmt, StmtNode *elseStmt = nullptr)
         : boolExpr(boolExpr), thenStmt(thenStmt), elseStmt(elseStmt) {}
 
-    std::string getCode() override {
-        std::stringstream ss;
+    Code getCode() override {
+        Code code;
         if (elseStmt == nullptr) {
             boolExpr->t = newlabel();
             boolExpr->f = next;
-            ss << boolExpr->getCode() << label(boolExpr->t);
+            code.append(boolExpr->getCode());
+            code.placeLabel(boolExpr->t);
             thenStmt->next = next;
-            ss << thenStmt->getCode();
+            code.append(thenStmt->getCode());
         } else {
             boolExpr->t = newlabel();
             boolExpr->f = newlabel();
-            ss << boolExpr->getCode() << label(boolExpr->t);
+            code.append(boolExpr->getCode());
+            code.placeLabel(boolExpr->t);
             thenStmt->next = next;
-            ss << thenStmt->getCode();
-            ss << "goto L" << next << "\n";
-            ss << label(boolExpr->f);
+            code.append(thenStmt->getCode());
+            code.emit(Instr::jump(next));
+            code.placeLabel(boolExpr->f);
             elseStmt->next = next;
-            ss << elseStmt->getCode();
+            code.append(elseStmt->getCode());
         }
-        return ss.str();
+        return code;
     }
 };
 
 class BreakStmtNode : public StmtNode {
 public:
-    std::string getCode() override {
+    Code getCode() override {
         if (loopStack.empty()) throw std::runtime_error("'break' outside of a loop");
-        std::stringstream ss;
-        ss << "goto L" << loopStack.back().breakLabel << "\n";
-        return ss.str();
+        Code code;
+        code.emit(Instr::jump(loopStack.back().breakLabel));
+        return code;
     }
 };
 
 class ContinueStmtNode : public StmtNode {
 public:
-    std::string getCode() override {
+    Code getCode() override {
         if (loopStack.empty()) throw std::runtime_error("'continue' outside of a loop");
-        std::stringstream ss;
-        ss << "goto L" << loopStack.back().continueLabel << "\n";
-        return ss.str();
+        Code code;
+        code.emit(Instr::jump(loopStack.back().continueLabel));
+        return code;
     }
 };
 
@@ -455,11 +605,11 @@ class DeclStmtNode : public StmtNode {
 public:
     DeclStmtNode(TypeNode *type, VarList *varList) 
         : type(type), varList(varList) {}
-    std::string getCode() override { 
+    Code getCode() override { 
         for (auto var : varList->varNames) {
             ST.insert(var, type->type);
         }
-        return ""; 
+        return Code();
     }
 };
 
@@ -470,11 +620,12 @@ public:
     AsgnStmtNode(std::string varName, ExprNode *expr)
         : varName(std::move(varName)), expr(expr) {}
 
-    std::string getCode() override {
-        std::stringstream ss;
-        ss << expr->getCode();
-        ss << varName << " = " << expr->addr->toString() << "\n";
-        return ss.str();
+    Code getCode() override {
+        Code code;
+        requireDeclared(varName);
+        code.append(expr->getCode());
+        code.emit(Instr::copy(varOperand(varName), operandOf(expr->addr)));
+        return code;
     }
 };
 
@@ -485,43 +636,41 @@ public:
     ArrAsgnStmtNode(PartialArrReference *partialArrRef, ExprNode *expr)
         : partialArrRef(partialArrRef), expr(expr) {}
 
-    std::string getCode() override {
-        std::stringstream ss;
+    Code getCode() override {
+        Code code;
         
-        ss << expr->getCode();
+        code.append(expr->getCode());
         
-        Type* currType = ST.getType(partialArrRef->varName);
+        STEntry *entry = partialArrRef->base->resolve();
+        Type *currType = entry->type;
         TempAddress* offsetAddr = nullptr;
 
         for (size_t i = 0; i < partialArrRef->indices.size(); ++i) {
             ExprNode* indexExpr = partialArrRef->indices[i];
-            ss << indexExpr->getCode();
+            code.append(indexExpr->getCode());
             
-            ArrayType* arrType = arrayTypeOrThrow(currType, partialArrRef->varName);
+            ArrayType* arrType = arrayTypeOrThrow(currType, entry);
             
             currType = arrType->elem;
             
             // t = E.addr * L.type.width
             TempAddress* t_term = new TempAddress();
-            ss << t_term->toString() << " = " << indexExpr->addr->toString() 
-               << " * " << currType->width << "\n";
+            code.emit(Instr::bin(operandOf(t_term), operandOf(indexExpr->addr), "*", constOperand(currType->width)));
                
             if (i == 0) {
                 offsetAddr = t_term;
             } else {
                 // L.addr = L1.addr + t
                 TempAddress* t_newOffset = new TempAddress();
-                ss << t_newOffset->toString() << " = " << offsetAddr->toString() 
-                   << " + " << t_term->toString() << "\n";
+                code.emit(Instr::bin(operandOf(t_newOffset), operandOf(offsetAddr), "+", operandOf(t_term)));
                 offsetAddr = t_newOffset;
             }
         }
         
         if (offsetAddr) {
-            ss << partialArrRef->varName << "[" << offsetAddr->toString() << "] = " 
-               << expr->addr->toString() << "\n";
-        }
-        return ss.str();
+            code.emit(Instr::store(operandOf(partialArrRef->base), operandOf(offsetAddr), operandOf(expr->addr)));
+        }        
+        return code;
     }
 };
 
@@ -535,33 +684,41 @@ public:
         statements.push_back(node);
     }
 
-    std::string getCode() override {
-        std::stringstream ss;
-        for (size_t i = 0; i < statements.size(); ++i) {
-            if (i < statements.size() - 1) {
-                int l = newlabel();
-                statements[i]->next = l;
-                ss << statements[i]->getCode();
-                ss << label(l);
+    Code getCode() override {
+        Code code;
+        for (size_t i = 0; i < statements.size(); i++) {
+            StmtNode *stmt = statements[i];
+            bool last = (i + 1 == statements.size());
+            if (last || needsNext(stmt)) {
+                stmt->next = last ? next : newlabel();
             } else {
-                statements[i]->next = this->next;
-                ss << statements[i]->getCode();
+                stmt->next = 0;
             }
+            code.append(stmt->getCode());
+            if (!last && needsNext(stmt)) code.placeLabel(stmt->next);
         }
-        return ss.str();
+        return code;
     }
 };
+
+inline bool needsNext(const StmtNode *stmt) {
+    if (dynamic_cast<const IfStmtNode *>(stmt) != nullptr) return true;
+    if (dynamic_cast<const WhileStmtNode *>(stmt) != nullptr) return true;
+    if (dynamic_cast<const ForStmtNode *>(stmt) != nullptr) return true;
+    if (dynamic_cast<const StmtListNode *>(stmt) != nullptr) return true;
+    return false;
+}
 
 class Program {
     StmtListNode *stmtListNode;
 public:
     explicit Program(StmtListNode *stmtListNode): stmtListNode(stmtListNode) {}
-    std::string getCode() {
-        std::stringstream ss;
+    Code getCode() {
+        Code code;
         stmtListNode->next = newlabel();
-        ss << stmtListNode->getCode();
-        ss << label(stmtListNode->next);
-        return ss.str();
+        code.append(stmtListNode->getCode());
+        code.placeLabel(stmtListNode->next);
+        return code;
     }
 };
 
