@@ -677,9 +677,7 @@ public:
 class StmtListNode : public StmtNode {
     std::vector<StmtNode *> statements;
 public:
-    explicit StmtListNode(StmtNode *node) {
-        statements.push_back(node);
-    }
+    explicit StmtListNode() { }
     void insert(StmtNode *node) {
         statements.push_back(node);
     }

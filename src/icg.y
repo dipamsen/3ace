@@ -68,7 +68,7 @@ PROG        : STMT_LIST                                             { prog = new
             ;
 
 STMT_LIST   : STMT_LIST STMT                                        { $1->insert($2); $$ = $1; }
-            | STMT                                                  { $$ = new StmtListNode($1); }
+            |                                                       { $$ = new StmtListNode(); }
             ;
 
 STMT        : WHILE '(' BOOL ')' STMT                               { $$ = new WhileStmtNode($3, $5); }
@@ -141,7 +141,6 @@ LST         : LST '[' NUM ']'                                       { $1->push_b
 %%
 
 #ifdef ICG_LIB
-
 
 static std::string lastError;   // message set by yyerror()
 
