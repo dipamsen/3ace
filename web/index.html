@@ -109,6 +109,10 @@
     padding: 1rem 1.25rem 1.25rem;
     overflow: auto;
   }
+  .modal-body iframe {
+    width: 100%;
+    height: 60vh;
+  }
   .grammar {
     margin: 0;
     white-space: pre-wrap;
@@ -233,10 +237,12 @@
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="grammar-title">
     <div class="modal-header">
       <h3 id="grammar-title">Grammar</h3>
-      <button id="close-grammar" class="close-btn" type="button" aria-label="Close grammar modal">×</button>
+      <button id="close-grammar" class="close-btn" type="button" aria-label="Close grammar modal">x</button>
     </div>
     <div class="modal-body">
-      <pre class="grammar" id="grammar-text"></pre>
+      <iframe src="./semantic-rules.pdf" width="100%" 
+        style="border: none;" 
+        title="Semantic Rules"></iframe> 
     </div>
   </div>
 </div>
@@ -306,81 +312,6 @@ while (x > y) {
   "expression": `int a, b, c, d, p;
 p = a + a * (b - c) + (b - c) * d;`
 };
-
-const GRAMMAR = `
-PROG        : STMT_LIST                                            
-            ;
-
-STMT_LIST   : STMT_LIST STMT                                       
-            | STMT                                                 
-            ;
-
-STMT        : WHILE '(' BOOL ')' STMT                              
-            | IF '(' BOOL ')' STMT ELSE STMT                       
-            | IF '(' BOOL ')' STMT %prec REDUCTION_PRECEDENCE      
-            | FOR '(' OPT_ASGN ';' OPT_BOOL ';' OPT_ASGN ')' STMT  
-            | BREAK ';'                                            
-            | CONTINUE ';'                                         
-            | '{' STMT_LIST '}'                                    
-            | DECL ';'                                             
-            | ASGN ';'                                             
-            ;
-
-ASGN        : ID '=' EXPR                                          
-            | ARR_REF '=' EXPR                                     
-            ;
-
-OPT_ASGN    : ASGN                                                 
-            |                                                      
-            ;
-
-OPT_BOOL    : BOOL                                                 
-            |                                                      
-            ;
-
-DECL        : TYPE VARLIST                                         
-            ;
-
-VARLIST     : VARLIST ',' ID                                       
-            | ID                                                   
-            ;
-
-EXPR        : EXPR '+' EXPR                                        
-            | EXPR '-' EXPR                                        
-            | EXPR '*' EXPR                                        
-            | EXPR '/' EXPR                                        
-            | EXPR '%' EXPR                                        
-            | '(' EXPR ')'                                         
-            | '-' EXPR %prec NEG                                   
-            | ARR_REF                                              
-            | ID                                                   
-            | NUM                                                  
-            | FLT                                                  
-            ;
-
-ARR_REF     : ID '[' EXPR ']'                                      
-            | ARR_REF '[' EXPR ']'                                 
-            ;
-
-BOOL        : BOOL OR BOOL                                         
-            | BOOL AND BOOL                                        
-            | '!' BOOL %prec NOT                                   
-            | EXPR RELOP EXPR                                      
-            | TRUE                                                 
-            | FALSE                                                
-            ;
-
-TYPE        : BASE LST                                             
-            ;
-
-BASE        : INT                                                  
-            | FLOAT                                                
-            ;
-
-LST         : LST '[' NUM ']'                                      
-            |                                                      
-            ;
-`
 
 const $ = id => document.getElementById(id);
 const sourceEl = $('src'), listing = $('listing'), status = $('status'),
@@ -601,7 +532,6 @@ function run() {
   setStatus(result);
 }
 
-grammarText.textContent = GRAMMAR.trim();
 
 function openGrammar() {
   grammarModal.classList.add('open');
