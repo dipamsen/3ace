@@ -10,8 +10,19 @@
 #include "type.hpp"
 #include "symtab.hpp"
 
+#ifndef YYLTYPE
+#define YYLTYPE_IS_DECLARED 1
+typedef struct YYLTYPE {
+    int first_line;
+    int first_column;
+    int last_line;
+    int last_column;
+} YYLTYPE;
+#endif
 
-// Counters for generated labels (L1, L2, ...) and temporaries (t1, t2, ...).
+extern YYLTYPE yylloc;
+typedef YYLTYPE Location;
+
 inline int labelCount = 0;
 inline int tempCount = 0;
 
@@ -19,8 +30,6 @@ inline int newlabel() {
     return ++labelCount;
 }
 
-// Jump targets of the loops enclosing the statement being generated
-// (innermost last). Used by `break` and `continue`.
 struct LoopContext {
     int breakLabel;
     int continueLabel;
@@ -28,8 +37,6 @@ struct LoopContext {
 
 inline std::vector<LoopContext> loopStack;
 
-// Restores all global state so a fresh program can be compiled from scratch
-// (needed when compiling repeatedly in one process, e.g. in the browser).
 inline void resetState() {
     labelCount = 0;
     tempCount = 0;
@@ -37,7 +44,6 @@ inline void resetState() {
     ST = SymbolTable();
 }
 
-// Array indexing needs an array type; report why when it isn't one.
 inline ArrayType *arrayTypeOrThrow(Type *type, STEntry *entry) {
     if (type == nullptr)
         throw std::runtime_error("'" + entry->name + "' is not declared");
@@ -145,11 +151,11 @@ inline Operand varOperand(const std::string &name) {
 
 enum class Op {
     Copy,   // dst = a
-    Bin,    // dst = a oper b
+    Bin,    // dst = a op b
     Neg,    // dst = minus a
-    Load,   // dst = arr[a]
-    Store,  // arr[a] = b
-    If,     // if a oper b goto target
+    Load,   // dst = a[b]
+    Store,  // dst[a] = b
+    If,     // if a rel b goto target
     Goto    // goto target
 };
 
@@ -159,6 +165,7 @@ struct Instr {
     std::string oper;
     int target = 0;
     std::vector<int> labels;
+    Location range;
 
     // dst = a
     static Instr copy(Operand dst, Operand a) {
@@ -195,8 +202,6 @@ struct Listing {
     std::vector<int> endLabels;
 };
 
-// A fragment of code under construction: instructions and label markers, in
-// order. Fragments are concatenated with append().
 class Code {
     struct Item {
         bool isLabel;
@@ -205,13 +210,12 @@ class Code {
     };
     std::vector<Item> items;
 public:
-    void emit(const Instr &instr) { items.push_back({false, 0, instr}); }
+    void emit(Location range, Instr instr) { instr.range = range; items.push_back({false, 0, instr}); }
     void placeLabel(int l)        { items.push_back({true, l, Instr()}); }
     void append(const Code &other) {
         items.insert(items.end(), other.items.begin(), other.items.end());
     }
 
-    // Attaches each label to the instruction that follows it.
     Listing flatten() const {
         Listing p;
         std::vector<int> pending;
@@ -262,9 +266,11 @@ public:
 };
 
 class ExprNode : public Node {
+protected:
+    Location range;
 public:
     Address *addr;
-    ExprNode() : addr(nullptr) {}
+    ExprNode(Location range) : addr(nullptr), range(range) {}
     ~ExprNode() override = default;
     virtual Code getCode() override = 0;
 };
@@ -274,8 +280,8 @@ class BinOpExprNode : public ExprNode {
     ExprNode *left;
     ExprNode *right;
 public:
-    BinOpExprNode(BinOpType op, ExprNode *left, ExprNode *right)
-        : op(op), left(left), right(right) {}
+    BinOpExprNode(BinOpType op, ExprNode *left, ExprNode *right, Location range)
+        : ExprNode(range), op(op), left(left), right(right) {}
 
     std::string getOp() const {
         switch (op) {
@@ -290,10 +296,10 @@ public:
 
     Code getCode() override {
         Code code;
-        addr = new TempAddress();
         code.append(left->getCode());
         code.append(right->getCode());
-        code.emit(Instr::bin(operandOf(addr), operandOf(left->addr), getOp(), operandOf(right->addr)));
+        addr = new TempAddress();
+        code.emit(range, Instr::bin(operandOf(addr), operandOf(left->addr), getOp(), operandOf(right->addr)));
         return code;
     }
 };
@@ -301,13 +307,14 @@ public:
 class UnaryOpExprNode : public ExprNode {
     ExprNode *expr;
 public:
-    explicit UnaryOpExprNode(ExprNode *expr) : expr(expr) {}
+    explicit UnaryOpExprNode(ExprNode *expr, Location range)
+        : ExprNode(range), expr(expr) {}
 
     Code getCode() override {
         Code code;
-        addr = new TempAddress();
         code.append(expr->getCode());
-        code.emit(Instr::neg(operandOf(addr), operandOf(expr->addr)));
+        addr = new TempAddress();
+        code.emit(range, Instr::neg(operandOf(addr), operandOf(expr->addr)));
         return code;
     }
 };
@@ -315,7 +322,8 @@ public:
 class IdExprNode : public ExprNode {
     std::string varName;
 public:
-    explicit IdExprNode(const std::string &varName) : varName(varName) {
+    explicit IdExprNode(const std::string &varName, Location range)
+        : ExprNode(range), varName(varName) {
         addr = new RefAddress(varName);
     }
     Code getCode() override {
@@ -328,8 +336,8 @@ class ConstExprNode : public ExprNode {
     ConstType type;
     std::string value;
 public:
-    ConstExprNode(ConstType type, const std::string &value) 
-        : type(type), value(value) {
+    ConstExprNode(ConstType type, const std::string &value, Location range)
+        : ExprNode(range), type(type), value(value) {
         addr = new ConstAddress(value);
     }
     Code getCode() override { return Code(); }
@@ -346,8 +354,8 @@ class PartialArrReference : public Node {
 class ArrayReferenceExprNode : public ExprNode {
     PartialArrReference *partialArrRef;
 public:
-    explicit ArrayReferenceExprNode(PartialArrReference *partialArrRef) 
-        : partialArrRef(partialArrRef) {}
+    explicit ArrayReferenceExprNode(PartialArrReference *partialArrRef, Location range)
+        : ExprNode(range), partialArrRef(partialArrRef) {}
 
     Code getCode() override {
         Code code;
@@ -365,21 +373,21 @@ public:
             
             // t = E.addr * L.type.width
             TempAddress* t_term = new TempAddress();
-            code.emit(Instr::bin(operandOf(t_term), operandOf(indexExpr->addr), "*", constOperand(currType->width)));
+            code.emit(range, Instr::bin(operandOf(t_term), operandOf(indexExpr->addr), "*", constOperand(currType->width)));
                
             if (i == 0) {
                 offsetAddr = t_term;
             } else {
                 // L.addr = L1.addr + t
                 TempAddress* t_newOffset = new TempAddress();
-                code.emit(Instr::bin(operandOf(t_newOffset), operandOf(offsetAddr), "+", operandOf(t_term)));
+                code.emit(range, Instr::bin(operandOf(t_newOffset), operandOf(offsetAddr), "+", operandOf(t_term)));
                 offsetAddr = t_newOffset;
             }
         }
         
         addr = new TempAddress();
         if (offsetAddr) {
-            code.emit(Instr::load(operandOf(addr), operandOf(partialArrRef->base), operandOf(offsetAddr)));
+            code.emit(range, Instr::load(operandOf(addr), operandOf(partialArrRef->base), operandOf(offsetAddr)));
         }
         
         return code;
@@ -387,9 +395,12 @@ public:
 };
 
 class BoolNode : public Node {
+protected:
+    Location range;
 public:
     int t = 0;
     int f = 0;
+    BoolNode(Location range): range(range) {}
     ~BoolNode() override = default;
     virtual Code getCode() override = 0;
 };
@@ -397,10 +408,11 @@ public:
 class ConstBoolNode : public BoolNode {
     bool value;
 public:
-    explicit ConstBoolNode(bool value) : value(value) {}
+    explicit ConstBoolNode(bool value, Location range)
+        : BoolNode(range), value(value) {}
     Code getCode() override {
         Code code;
-        code.emit(Instr::jump(value ? t : f));
+        code.emit(range, Instr::jump(value ? t : f));
         return code;
     }
 };
@@ -410,15 +422,15 @@ class RelOpBoolNode : public BoolNode {
     ExprNode *right;
     std::string op;
 public:
-    RelOpBoolNode(ExprNode *left, ExprNode *right, std::string op)
-        : left(left), right(right), op(std::move(op)) {}
+    RelOpBoolNode(ExprNode *left, ExprNode *right, std::string op, Location range)
+        : BoolNode(range), left(left), right(right), op(std::move(op)) {}
 
     Code getCode() override {
         Code code;
         code.append(left->getCode());
         code.append(right->getCode());
-        code.emit(Instr::ifGoto(operandOf(left->addr), op, operandOf(right->addr), t));
-        code.emit(Instr::jump(f));
+        code.emit(range, Instr::ifGoto(operandOf(left->addr), op, operandOf(right->addr), t));
+        code.emit(range, Instr::jump(f));
         return code;
     }
 };
@@ -428,8 +440,8 @@ class BinOpBoolNode : public BoolNode {
     BoolNode *right;
     BoolOpType op;
 public:
-    BinOpBoolNode(BoolNode *left, BoolNode *right, BoolOpType op)
-        : left(left), right(right), op(op) {}
+    BinOpBoolNode(BoolNode *left, BoolNode *right, BoolOpType op, Location range)
+        : BoolNode(range), left(left), right(right), op(op) {}
 
     Code getCode() override {
         Code code;
@@ -459,8 +471,11 @@ public:
 };
 
 class StmtNode : public Node {
+protected:
+    Location range;
 public:
     int next = 0;
+    StmtNode(Location range): range(range) {}
     ~StmtNode() override = default;
     virtual Code getCode() override = 0;
 };
@@ -468,9 +483,10 @@ public:
 class WhileStmtNode : public StmtNode {
     BoolNode *boolExpr;
     StmtNode *stmt;
+    Location whileToken;
 public:
-    WhileStmtNode(BoolNode *boolExpr, StmtNode *stmt) 
-        : boolExpr(boolExpr), stmt(stmt) {}
+    WhileStmtNode(BoolNode *boolExpr, StmtNode *stmt, Location range, Location whileToken) 
+        : boolExpr(boolExpr), stmt(stmt), StmtNode(range), whileToken(whileToken) {}
     Code getCode() override { 
         Code code;
         int begin = newlabel();
@@ -483,19 +499,22 @@ public:
         code.placeLabel(boolExpr->t);
         code.append(stmt->getCode());
         loopStack.pop_back();
-        code.emit(Instr::jump(begin));
+        code.emit(range, Instr::jump(begin));
         return code;
     }
 };
 
-// for (init; cond; incr) body    -- init, cond and incr may each be null
 class ForStmtNode : public StmtNode { 
     StmtNode *init;
     BoolNode *cond;
     StmtNode *incr;
     StmtNode *body;
+    Location forToken;
+    
 public:
-    ForStmtNode(StmtNode *init, BoolNode *cond, StmtNode *incr, StmtNode *body): init(init), cond(cond), incr(incr), body(body) {}
+    ForStmtNode(StmtNode *init, BoolNode *cond, StmtNode *incr, StmtNode *body, Location range, Location forToken): 
+        init(init), cond(cond), incr(incr), body(body),
+        StmtNode(range), forToken(forToken) {}
     Code getCode() override {
         Code code;
         int begin = newlabel();
@@ -514,7 +533,7 @@ public:
         loopStack.pop_back();
         code.placeLabel(incrLabel);
         if (incr) code.append(incr->getCode());
-        code.emit(Instr::jump(begin));
+        code.emit(range, Instr::jump(begin));
         return code;
     }
 };
@@ -523,10 +542,11 @@ class IfStmtNode : public StmtNode {
     BoolNode *boolExpr;
     StmtNode *thenStmt;
     StmtNode *elseStmt;
+    Location ifToken, elseToken;
 public:
-    IfStmtNode(BoolNode *boolExpr, StmtNode *thenStmt, StmtNode *elseStmt = nullptr)
-        : boolExpr(boolExpr), thenStmt(thenStmt), elseStmt(elseStmt) {}
-
+    IfStmtNode(BoolNode *boolExpr, StmtNode *thenStmt, StmtNode *elseStmt, Location range, Location ifToken, Location elseToken)
+        : boolExpr(boolExpr), thenStmt(thenStmt), elseStmt(elseStmt),
+         StmtNode(range), ifToken(ifToken), elseToken(elseToken) {}
     Code getCode() override {
         Code code;
         if (elseStmt == nullptr) {
@@ -543,7 +563,7 @@ public:
             code.placeLabel(boolExpr->t);
             thenStmt->next = next;
             code.append(thenStmt->getCode());
-            code.emit(Instr::jump(next));
+            code.emit(range, Instr::jump(next));
             code.placeLabel(boolExpr->f);
             elseStmt->next = next;
             code.append(elseStmt->getCode());
@@ -554,20 +574,22 @@ public:
 
 class BreakStmtNode : public StmtNode {
 public:
+    explicit BreakStmtNode(Location range) : StmtNode(range) {}
     Code getCode() override {
         if (loopStack.empty()) throw std::runtime_error("'break' outside of a loop");
         Code code;
-        code.emit(Instr::jump(loopStack.back().breakLabel));
+        code.emit(range, Instr::jump(loopStack.back().breakLabel));
         return code;
     }
 };
 
 class ContinueStmtNode : public StmtNode {
 public:
+    explicit ContinueStmtNode(Location range) : StmtNode(range) {}
     Code getCode() override {
         if (loopStack.empty()) throw std::runtime_error("'continue' outside of a loop");
         Code code;
-        code.emit(Instr::jump(loopStack.back().continueLabel));
+        code.emit(range, Instr::jump(loopStack.back().continueLabel));
         return code;
     }
 };
@@ -603,8 +625,8 @@ class DeclStmtNode : public StmtNode {
     TypeNode *type;
     VarList *varList;
 public:
-    DeclStmtNode(TypeNode *type, VarList *varList) 
-        : type(type), varList(varList) {}
+    DeclStmtNode(TypeNode *type, VarList *varList, Location range) 
+        : type(type), varList(varList), StmtNode(range) {}
     Code getCode() override { 
         for (auto var : varList->varNames) {
             ST.insert(var, type->type);
@@ -616,15 +638,16 @@ public:
 class AsgnStmtNode : public StmtNode {
     std::string varName;
     ExprNode *expr;
+    Location eqToken;
 public:
-    AsgnStmtNode(std::string varName, ExprNode *expr)
-        : varName(std::move(varName)), expr(expr) {}
+    AsgnStmtNode(std::string varName, ExprNode *expr, Location range, Location eq)
+        : varName(std::move(varName)), expr(expr), StmtNode(range), eqToken(eq) {}
 
     Code getCode() override {
         Code code;
         requireDeclared(varName);
         code.append(expr->getCode());
-        code.emit(Instr::copy(varOperand(varName), operandOf(expr->addr)));
+        code.emit(range, Instr::copy(varOperand(varName), operandOf(expr->addr)));
         return code;
     }
 };
@@ -632,9 +655,10 @@ public:
 class ArrAsgnStmtNode : public StmtNode {
     PartialArrReference *partialArrRef;
     ExprNode *expr;
+    Location eqToken;
 public:
-    ArrAsgnStmtNode(PartialArrReference *partialArrRef, ExprNode *expr)
-        : partialArrRef(partialArrRef), expr(expr) {}
+    ArrAsgnStmtNode(PartialArrReference *partialArrRef, ExprNode *expr, Location range, Location eq)
+        : partialArrRef(partialArrRef), expr(expr), StmtNode(range), eqToken(eq) {}
 
     Code getCode() override {
         Code code;
@@ -655,20 +679,20 @@ public:
             
             // t = E.addr * L.type.width
             TempAddress* t_term = new TempAddress();
-            code.emit(Instr::bin(operandOf(t_term), operandOf(indexExpr->addr), "*", constOperand(currType->width)));
+            code.emit(range, Instr::bin(operandOf(t_term), operandOf(indexExpr->addr), "*", constOperand(currType->width)));
                
             if (i == 0) {
                 offsetAddr = t_term;
             } else {
                 // L.addr = L1.addr + t
                 TempAddress* t_newOffset = new TempAddress();
-                code.emit(Instr::bin(operandOf(t_newOffset), operandOf(offsetAddr), "+", operandOf(t_term)));
+                code.emit(range, Instr::bin(operandOf(t_newOffset), operandOf(offsetAddr), "+", operandOf(t_term)));
                 offsetAddr = t_newOffset;
             }
         }
         
         if (offsetAddr) {
-            code.emit(Instr::store(operandOf(partialArrRef->base), operandOf(offsetAddr), operandOf(expr->addr)));
+            code.emit(range, Instr::store(operandOf(partialArrRef->base), operandOf(offsetAddr), operandOf(expr->addr)));
         }        
         return code;
     }
@@ -677,9 +701,10 @@ public:
 class StmtListNode : public StmtNode {
     std::vector<StmtNode *> statements;
 public:
-    explicit StmtListNode() { }
-    void insert(StmtNode *node) {
+    explicit StmtListNode(Location range) : StmtNode(range) {}
+    void insert(StmtNode *node, Location x) {
         statements.push_back(node);
+        range = x;
     }
 
     Code getCode() override {

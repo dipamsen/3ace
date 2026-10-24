@@ -62,28 +62,30 @@ Program *prog;
 %nonassoc REDUCTION_PRECEDENCE
 %nonassoc ELSE
 
+%locations
+
 %%
 
 PROG        : STMT_LIST                                             { prog = new Program($1); }
             ;
 
-STMT_LIST   : STMT_LIST STMT                                        { $1->insert($2); $$ = $1; }
-            |                                                       { $$ = new StmtListNode(); }
+STMT_LIST   : STMT_LIST STMT                                        { $1->insert($2, @$); $$ = $1; }
+            |                                                       { $$ = new StmtListNode(@$); }
             ;
 
-STMT        : WHILE '(' BOOL ')' STMT                               { $$ = new WhileStmtNode($3, $5); }
-            | IF '(' BOOL ')' STMT ELSE STMT                        { $$ = new IfStmtNode($3, $5, $7); }
-            | IF '(' BOOL ')' STMT %prec REDUCTION_PRECEDENCE       { $$ = new IfStmtNode($3, $5, nullptr); }
-            | FOR '(' OPT_ASGN ';' OPT_BOOL ';' OPT_ASGN ')' STMT   { $$ = new ForStmtNode($3, $5, $7, $9); }
-            | BREAK ';'                                             { $$ = new BreakStmtNode(); }
-            | CONTINUE ';'                                          { $$ = new ContinueStmtNode(); }
+STMT        : WHILE '(' BOOL ')' STMT                               { $$ = new WhileStmtNode($3, $5, @$, @1); }
+            | IF '(' BOOL ')' STMT ELSE STMT                        { $$ = new IfStmtNode($3, $5, $7, @$, @1, @6); }
+            | IF '(' BOOL ')' STMT %prec REDUCTION_PRECEDENCE       { $$ = new IfStmtNode($3, $5, nullptr, @$, @1, @1); }
+            | FOR '(' OPT_ASGN ';' OPT_BOOL ';' OPT_ASGN ')' STMT   { $$ = new ForStmtNode($3, $5, $7, $9, @$, @1); }
+            | BREAK ';'                                             { $$ = new BreakStmtNode(@$); }
+            | CONTINUE ';'                                          { $$ = new ContinueStmtNode(@$); }
             | '{' STMT_LIST '}'                                     { $$ = $2; }
             | DECL ';'                                              { $$ = $1; }
             | ASGN ';'                                              { $$ = $1; }
             ;
 
-ASGN        : ID '=' EXPR                                           { $$ = new AsgnStmtNode($1, $3); }
-            | ARR_REF '=' EXPR                                      { $$ = new ArrAsgnStmtNode($1, $3); }
+ASGN        : ID '=' EXPR                                           { $$ = new AsgnStmtNode($1, $3, @$, @2); }
+            | ARR_REF '=' EXPR                                      { $$ = new ArrAsgnStmtNode($1, $3, @$, @2); }
             ;
 
 OPT_ASGN    : ASGN                                                  { $$ = $1; }
@@ -94,37 +96,37 @@ OPT_BOOL    : BOOL                                                  { $$ = $1; }
             |                                                       { $$ = nullptr; }
             ;
 
-DECL        : TYPE VARLIST                                          { $$ = new DeclStmtNode($1, $2); }
+DECL        : TYPE VARLIST                                          { $$ = new DeclStmtNode($1, $2, @$); }
             ;
 
 VARLIST     : VARLIST ',' ID                                        { $1->insert($3); $$ = $1; }
             | ID                                                    { $$ = new VarList($1); }
             ;
 
-EXPR        : EXPR '+' EXPR                                         { $$ = new BinOpExprNode(PLUS, $1, $3); }
-            | EXPR '-' EXPR                                         { $$ = new BinOpExprNode(MINUS, $1, $3); }
-            | EXPR '*' EXPR                                         { $$ = new BinOpExprNode(MUL, $1, $3); }
-            | EXPR '/' EXPR                                         { $$ = new BinOpExprNode(DIV, $1, $3); }
-            | EXPR '%' EXPR                                         { $$ = new BinOpExprNode(MOD, $1, $3); }
+EXPR        : EXPR '+' EXPR                                         { $$ = new BinOpExprNode(PLUS, $1, $3, @$); }
+            | EXPR '-' EXPR                                         { $$ = new BinOpExprNode(MINUS, $1, $3, @$); }
+            | EXPR '*' EXPR                                         { $$ = new BinOpExprNode(MUL, $1, $3, @$); }
+            | EXPR '/' EXPR                                         { $$ = new BinOpExprNode(DIV, $1, $3, @$); }
+            | EXPR '%' EXPR                                         { $$ = new BinOpExprNode(MOD, $1, $3, @$); }
             | '(' EXPR ')'                                          { $$ = $2; }
-            | '-' EXPR %prec NEG                                    { $$ = new UnaryOpExprNode($2); }
-            | ARR_REF                                               { $$ = new ArrayReferenceExprNode($1); }
-            | ID                                                    { $$ = new IdExprNode($1); }
-            | NUM                                                   { $$ = new ConstExprNode(INT_CONST, $1); }
-            | FLT                                                   { $$ = new ConstExprNode(FLOAT_CONST, $1); }
+            | '-' EXPR %prec NEG                                    { $$ = new UnaryOpExprNode($2, @$); }
+            | ARR_REF                                               { $$ = new ArrayReferenceExprNode($1, @$); }
+            | ID                                                    { $$ = new IdExprNode($1, @$); }
+            | NUM                                                   { $$ = new ConstExprNode(INT_CONST, $1, @$); }
+            | FLT                                                   { $$ = new ConstExprNode(FLOAT_CONST, $1, @$); }
             ;
 
 ARR_REF     : ID '[' EXPR ']'                                       { $$ = new PartialArrReference($1); $$->insert($3); }
             | ARR_REF '[' EXPR ']'                                  { $1->insert($3); $$ = $1; }
             ;
 
-BOOL        : BOOL OR BOOL                                          { $$ = new BinOpBoolNode($1, $3, OR_OP); }
-            | BOOL AND BOOL                                         { $$ = new BinOpBoolNode($1, $3, AND_OP); }
-            | '!' BOOL %prec NOT                                    { $$ = new BinOpBoolNode($2, nullptr, NOT_OP); }
+BOOL        : BOOL OR BOOL                                          { $$ = new BinOpBoolNode($1, $3, OR_OP, @$); }
+            | BOOL AND BOOL                                         { $$ = new BinOpBoolNode($1, $3, AND_OP, @$); }
+            | '!' BOOL %prec NOT                                    { $$ = new BinOpBoolNode($2, nullptr, NOT_OP, @$); }
             | '(' BOOL ')'                                          { $$ = $2; }
-            | EXPR RELOP EXPR                                       { $$ = new RelOpBoolNode($1, $3, $2); }
-            | TRUE                                                  { $$ = new ConstBoolNode(true); }
-            | FALSE                                                 { $$ = new ConstBoolNode(false); }
+            | EXPR RELOP EXPR                                       { $$ = new RelOpBoolNode($1, $3, $2, @$); }
+            | TRUE                                                  { $$ = new ConstBoolNode(true, @$); }
+            | FALSE                                                 { $$ = new ConstBoolNode(false, @$); }
             ;
 
 TYPE        : BASE LST                                              { $$ = new TypeNode($1, $2); }
@@ -183,7 +185,21 @@ static std::string operandJson(const Operand &o) {
     return std::string("{\"k\":\"") + kind + "\",\"v\":\"" + jsonEscape(o.text) + "\"}";
 }
 
-// One instruction, with only the fields its op uses:
+static std::string locationJson(Location l) {
+    std::string out;
+    out += "{";
+    out += "\"startLineNumber\":";
+    out += std::to_string(l.first_line);
+    out += ",\"startColumn\":";
+    out += std::to_string(l.first_column);
+    out += ",\"endLineNumber\":";
+    out += std::to_string(l.last_line);
+    out += ",\"endColumn\":";
+    out += std::to_string(l.last_column);
+    out += "}";
+    return out;
+}
+
 //   copy  {dst,a}          bin  {dst,a,o,b}      neg  {dst,a}
 //   load  {dst,a,b}        store {dst,a,b}
 //   if    {a,o,b,target}   goto {target}
@@ -194,6 +210,10 @@ static std::string instrJson(const Instr &i) {
         out += std::to_string(i.labels[k]);
     }
     out += "],";
+    out += "\"location\":";
+    out += locationJson(i.range);
+    out += ",";
+
     switch (i.op) {
         case Op::Copy:
             out += "\"op\":\"copy\",\"dst\":" + operandJson(i.dst) + ",\"a\":" + operandJson(i.a); break;
@@ -234,7 +254,6 @@ static std::string listingJson(const Listing &p) {
 // Compiles `source` and returns JSON:
 //   {"ok":true,"output":"<text form>","program":{"instrs":[...],"endLabels":[...]}}
 //   {"ok":false,"error":{"message":"...","line":N|null}}
-// The returned pointer stays valid until the next call.
 extern "C" const char *icg_compile(const char *source) {
     static std::string result;
 
